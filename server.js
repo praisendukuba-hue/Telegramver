@@ -6,14 +6,26 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Initialize Firebase
-const serviceAccount = require('./serviceAccountKey.json');
+// ==========================================
+// SECURE FIREBASE INITIALIZATION
+// ==========================================
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+    console.error("❌ CRITICAL ERROR: FIREBASE_SERVICE_ACCOUNT environment variable is missing!");
+    process.exit(1);
+}
+
+// Parse the JSON string from the environment variable
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
 });
+
 const db = admin.firestore();
 
-// API Endpoint: Verify Device
+// ==========================================
+// API ENDPOINT: Verify Device
+// ==========================================
 app.post('/api/verify-device', async (req, res) => {
     try {
         const { telegram_id, device_fp } = req.body;
@@ -35,8 +47,7 @@ app.post('/api/verify-device', async (req, res) => {
             if (String(existingUserId) !== String(telegram_id)) {
                 // DUPLICATE DEVICE - Allow but block referrals
                 isDuplicate = true;
-                referralBlocked = true;
-                
+                referralBlocked = true;                
                 // Save to user data
                 await db.collection('users').doc(String(telegram_id)).set({
                     device_fp: device_fp,
@@ -45,9 +56,10 @@ app.post('/api/verify-device', async (req, res) => {
                     verified_at: Date.now()
                 }, { merge: true });
 
-                console.log(`️ DUPLICATE: User ${telegram_id} on device ${device_fp}`);
+                console.log(`⚠️ DUPLICATE: User ${telegram_id} on device ${device_fp}`);
             }
         }
+
         if (!isDuplicate) {
             // NEW DEVICE - Full verification
             await db.collection('devices').doc(deviceKey).set({
@@ -79,11 +91,12 @@ app.post('/api/verify-device', async (req, res) => {
     }
 });
 
-// API Endpoint: Check Verification Status
+// ==========================================
+// API ENDPOINT: Check Verification Status
+// ==========================================
 app.get('/api/check-verification/:user_id', async (req, res) => {
     try {
-        const userId = req.params.user_id;
-        const userRef = db.collection('users').doc(String(userId));
+        const userId = req.params.user_id;        const userRef = db.collection('users').doc(String(userId));
         const userDoc = await userRef.get();
 
         if (userDoc.exists) {
@@ -97,11 +110,15 @@ app.get('/api/check-verification/:user_id', async (req, res) => {
             res.json({ verified: false });
         }
     } catch (error) {
+        console.error('Check verification error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
+// ==========================================
+// START SERVER
+// ==========================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Backend running on port ${PORT}`);
+    console.log(`🚀 Backend running securely on port ${PORT}`);
 });
