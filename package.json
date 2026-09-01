@@ -1,0 +1,14 @@
+here{
+  "name": "telegram-verification-backend",
+  "version": "1.0.0",
+  "description": "Backend for Telegram device verification",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "firebase-admin": "^11.11.0",
+    "cors": "^2.8.5"
+  }
+}
