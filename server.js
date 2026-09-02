@@ -7,58 +7,33 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// CHECK ENVIRONMENT VARIABLES FIRST
-console.log('🔍 Checking environment variables...');
-console.log('FIREBASE_SERVICE_ACCOUNT exists:', !!process.env.FIREBASE_SERVICE_ACCOUNT);
-console.log('BOT_TOKEN exists:', !!process.env.BOT_TOKEN);
-
-if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
-    console.error('❌ ERROR: FIREBASE_SERVICE_ACCOUNT is missing!');
+// 1. CHECK ENVIRONMENT VARIABLES
+if (!process.env.FIREBASE_SERVICE_ACCOUNT || !process.env.BOT_TOKEN) {
+    console.error("Missing environment variables!");
     process.exit(1);
 }
 
-if (!process.env.BOT_TOKEN) {
-    console.error('❌ ERROR: BOT_TOKEN is missing!');
-    process.exit(1);
-}
-
-// Initialize Firebase
-try {
-    console.log('🔧 Parsing Firebase service account...');
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    console.log('✅ Firebase account parsed successfully');
-    
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-    const db = admin.firestore();
-    console.log('✅ Firebase initialized');
-} catch (error) {
-    console.error('❌ Firebase initialization error:', error.message);
-    console.error('Check your FIREBASE_SERVICE_ACCOUNT environment variable!');
-    process.exit(1);
-}
-
+// 2. INITIALIZE FIREBASE
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// ROOT ROUTE
+// 3. HOMEPAGE ROUTE (This fixes the "Not Found" error!)
 app.get('/', (req, res) => {
-    res.send('✅ Server is running! Visit /api/verify-device to verify.');
+    res.send("✅ Server is awake and running!");
 });
 
-// VERIFICATION ENDPOINT
+// 4. VERIFICATION ROUTE
 app.post('/api/verify-device', async (req, res) => {
-    console.log('📥 Received verification request');
-        try {
+    try {
         const { initData, device_fp } = req.body;
         const botToken = process.env.BOT_TOKEN;
 
-        if (!initData || !device_fp || !botToken) {
-            return res.status(400).json({ 
-                success: false, 
-                message: 'Missing required fields' 
-            });
+        if (!initData || !device_fp) {
+            return res.status(400).json({ success: false, message: 'Missing data' });
         }
 
-        // Validate Telegram data
+        // Validate Telegram signature
         const urlParams = new URLSearchParams(initData);
         const hash = urlParams.get('hash');
         urlParams.delete('hash');
@@ -72,13 +47,13 @@ app.post('/api/verify-device', async (req, res) => {
         const calculatedHash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
         
         if (calculatedHash !== hash) {
-            return res.status(401).json({ success: false, message: 'Invalid signature' });
-        }
+            return res.status(401).json({ success: false, message: 'Invalid signature' });        }
 
         const userStr = new URLSearchParams(initData).get('user');
         const userData = JSON.parse(userStr);
         const telegram_id = String(userData.id);
 
+        // Check for duplicate device
         const deviceKey = `device_${device_fp}`;
         const deviceDoc = await db.collection('devices').doc(deviceKey).get();
 
@@ -90,13 +65,13 @@ app.post('/api/verify-device', async (req, res) => {
             if (String(existingUserId) !== telegram_id) {
                 isDuplicate = true;
                 referralBlocked = true;
-                
                 await db.collection('users').doc(telegram_id).set({
                     device_fp: device_fp,
                     device_verified: 'yes',
                     referral_blocked: 'yes',
                     verified_at: Date.now()
-                }, { merge: true });            }
+                }, { merge: true });
+            }
         }
 
         if (!isDuplicate) {
@@ -105,7 +80,6 @@ app.post('/api/verify-device', async (req, res) => {
                 device_fp: device_fp,
                 created_at: Date.now()
             });
-
             await db.collection('users').doc(telegram_id).set({
                 device_fp: device_fp,
                 device_verified: 'yes',
@@ -114,20 +88,14 @@ app.post('/api/verify-device', async (req, res) => {
             }, { merge: true });
         }
 
-        res.json({ 
-            success: true, 
-            verified: true,
-            duplicate: isDuplicate,
-            referralBlocked: referralBlocked
-        });
+        res.json({ success: true, duplicate: isDuplicate, referralBlocked: referralBlocked });
 
     } catch (error) {
-        console.error('❌ Verification error:', error);
+        console.error('Error:', error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`✅ Server running on port ${PORT}`);
+const PORT = process.env.PORT || 3000;app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
