@@ -1,39 +1,70 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ==========================================
-// SECURE FIREBASE INITIALIZATION
-// ==========================================
+// Initialize Firebase
 if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
     console.error("❌ CRITICAL ERROR: FIREBASE_SERVICE_ACCOUNT environment variable is missing!");
     process.exit(1);
 }
-
-// Parse the JSON string from the environment variable
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-});
-
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// ==========================================
-// API ENDPOINT: Verify Device
-// ==========================================
+// Helper to validate Telegram initData securely
+function validateTelegramInitData(initData, botToken) {
+    try {
+        const urlParams = new URLSearchParams(initData);
+        const hash = urlParams.get('hash');
+        urlParams.delete('hash');
+        
+        const dataCheckString = Array.from(urlParams.entries())
+            .sort(([a], [b]) => a < b ? -1 : 1)
+            .map(([key, val]) => `${key}=${val}`)
+            .join('\n');
+            
+        const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+        const calculatedHash = crypto.createHmac('sha256', secret).update(dataCheckString).digest('hex');
+        
+        return calculatedHash === hash;
+    } catch (e) {
+        return false;
+    }
+}
+
+function parseTelegramInitData(initData) {
+    const urlParams = new URLSearchParams(initData);
+    const userStr = urlParams.get('user');
+    return userStr ? JSON.parse(userStr) : null;
+}
+
 app.post('/api/verify-device', async (req, res) => {
     try {
-        const { telegram_id, device_fp } = req.body;
-        
-        if (!telegram_id || !device_fp) {
-            return res.status(400).json({ success: false, message: 'Missing data' });
+        const { initData, device_fp } = req.body;
+        const botToken = process.env.BOT_TOKEN; 
+        if (!initData || !device_fp || !botToken) {
+            return res.status(400).json({ success: false, message: 'Missing initData, device_fp, or BOT_TOKEN' });
         }
 
+        // 1. SECURELY VALIDATE THE USER (Prevents spoofing)
+        const isValid = validateTelegramInitData(initData, botToken);
+        if (!isValid) {
+            return res.status(401).json({ success: false, message: 'Invalid Telegram initData signature' });
+        }
+
+        const userData = parseTelegramInitData(initData);
+        if (!userData || !userData.id) {
+            return res.status(400).json({ success: false, message: 'User data not found in initData' });
+        }
+
+        const telegram_id = String(userData.id);
+
+        // 2. PROCESS DEVICE VERIFICATION
         const deviceKey = `device_${device_fp}`;
         const deviceRef = db.collection('devices').doc(deviceKey);
         const deviceDoc = await deviceRef.get();
@@ -43,39 +74,31 @@ app.post('/api/verify-device', async (req, res) => {
 
         if (deviceDoc.exists) {
             const existingUserId = deviceDoc.data().telegram_id;
-            
-            if (String(existingUserId) !== String(telegram_id)) {
-                // DUPLICATE DEVICE - Allow but block referrals
+            if (String(existingUserId) !== telegram_id) {
                 isDuplicate = true;
-                referralBlocked = true;                
-                // Save to user data
-                await db.collection('users').doc(String(telegram_id)).set({
+                referralBlocked = true;
+                
+                await db.collection('users').doc(telegram_id).set({
                     device_fp: device_fp,
                     device_verified: 'yes',
                     referral_blocked: 'yes',
                     verified_at: Date.now()
                 }, { merge: true });
-
-                console.log(`⚠️ DUPLICATE: User ${telegram_id} on device ${device_fp}`);
             }
         }
 
         if (!isDuplicate) {
-            // NEW DEVICE - Full verification
             await db.collection('devices').doc(deviceKey).set({
                 telegram_id: telegram_id,
                 device_fp: device_fp,
                 created_at: Date.now()
             });
 
-            await db.collection('users').doc(String(telegram_id)).set({
+            await db.collection('users').doc(telegram_id).set({
                 device_fp: device_fp,
-                device_verified: 'yes',
-                referral_blocked: 'no',
+                device_verified: 'yes',                referral_blocked: 'no',
                 verified_at: Date.now()
             }, { merge: true });
-
-            console.log(`✅ VERIFIED: User ${telegram_id}`);
         }
 
         res.json({ 
@@ -91,33 +114,6 @@ app.post('/api/verify-device', async (req, res) => {
     }
 });
 
-// ==========================================
-// API ENDPOINT: Check Verification Status
-// ==========================================
-app.get('/api/check-verification/:user_id', async (req, res) => {
-    try {
-        const userId = req.params.user_id;        const userRef = db.collection('users').doc(String(userId));
-        const userDoc = await userRef.get();
-
-        if (userDoc.exists) {
-            const userData = userDoc.data();
-            res.json({
-                verified: userData.device_verified === 'yes',
-                referralBlocked: userData.referral_blocked === 'yes',
-                deviceFp: userData.device_fp
-            });
-        } else {
-            res.json({ verified: false });
-        }
-    } catch (error) {
-        console.error('Check verification error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ==========================================
-// START SERVER
-// ==========================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Backend running securely on port ${PORT}`);
